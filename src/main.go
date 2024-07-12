@@ -60,7 +60,7 @@ var speed = flag.Float64("speed", 4.0, "set the writing speed. 4 is the default 
 var get_error = flag.Int("get-error", 0, "get an error message for a specific error code")
 var help = flag.Bool("help", false, "show this help message")
 
-func sendSCSICommand(device string, cmd []byte) ([]byte, error) {
+func sendSCSICommand(device string, cmd []byte) ([]byte, int) {
 	var response = make([]byte, 96) // Adjust size as needed
 
 	deviceC := C.CString(device)
@@ -78,10 +78,10 @@ func sendSCSICommand(device string, cmd []byte) ([]byte, error) {
 	)
 
 	if ret != 0 {
-		return nil, fmt.Errorf("SCSI command failed, code %d", ret)
+		return nil, int(ret)
 	}
 
-	return response, nil
+	return response, 0
 }
 
 func main() {
@@ -99,7 +99,11 @@ func main() {
 
 	if *get_error != 0 {
 		fmt.Print("Error code ", *get_error, " means: ")
-		switch *get_error {
+		var actual_error = int32(*get_error)
+		if actual_error > 0 {
+			actual_error = ^(int32(actual_error)) + 1
+		}
+		switch actual_error {
 		case -1:
 			fmt.Println("Error opening device. This could mean that the device does not exist, or that you do not have permission to access it.")
 		case -2:
@@ -120,9 +124,9 @@ func main() {
 		fmt.Println("Dummy mode is enabled. No data will be written to the disk.")
 	}
 	var inquiryData5, inquiryError5 = sendSCSICommand(flag.Arg(1), []byte{0x12, 0x00, 0x00, 0x00, 0x05, 0x00})
-	if inquiryError5 != nil {
-		fmt.Println("Error getting device information:", inquiryError5)
-		return
+	if inquiryError5 != 0 {
+		fmt.Println("Error getting device information: SCSI error", inquiryError5)
+		os.Exit(inquiryError5)
 	}
 	if inquiryData5[0]&(0x05) != 0x05 {
 		fmt.Println("Device is not a CD/DVD drive.")
