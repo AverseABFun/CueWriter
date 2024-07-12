@@ -1,11 +1,14 @@
 package main
 
-/* #include <fcntl.h>
+/*
+#cgo LDFLAGS: -L./libcue/build -lcue
+#include <fcntl.h>
 #include <unistd.h>
 #include <scsi/sg.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include "libcue/libcue.h"
 
 #define SENSE_BUFF_LEN 32
 
