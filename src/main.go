@@ -101,7 +101,7 @@ func main() {
 		fmt.Print("Error code ", *get_error, " means: ")
 		var actual_error = int32(*get_error)
 		if actual_error > 0 {
-			actual_error = ^(int32(actual_error)) + 1
+			actual_error = int32(-(^(int8(actual_error)) + 1))
 		}
 		switch actual_error {
 		case -1:
