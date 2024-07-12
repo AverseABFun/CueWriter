@@ -1,0 +1,3 @@
+[submodule "src/libcue"]
+	path = src/libcue
+	url = https://github.com/lipnitsk/libcue
