@@ -87,6 +87,15 @@ func sendSCSICommand(device string, cmd []byte) ([]byte, int) {
 	return response, 0
 }
 
+func convertPointerToString(ptr *C.char) string {
+	var output = ""
+	for *ptr != 0 {
+		output += string(*ptr)
+		ptr = (*C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + 1))
+	}
+	return output
+}
+
 func main() {
 	fmt.Println("cuewriter v" + VERSION + ` - a tool to write CUE files to CDs
 	AGPL license, written by Averse
@@ -135,4 +144,28 @@ func main() {
 		fmt.Println("Device is not a CD/DVD drive.")
 		return
 	}
+	var file, fileerror = os.OpenFile(flag.Arg(0), os.O_RDONLY, 0)
+	if fileerror != nil {
+		fmt.Println("Error opening file:", fileerror)
+		return
+	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		fmt.Println("Error getting file information:", err)
+		return
+	}
+	var filedata = make([]byte, fileInfo.Size())
+	file.Read(filedata)
+	var cueCD = C.cue_parse_string((*C.char)(unsafe.Pointer(&(filedata[0]))))
+	file.Close()
+	var numTracks = int32(C.cd_get_ntrack(cueCD))
+	if numTracks == 0 {
+		fmt.Println("No tracks found in CUE file.")
+		return
+	}
+	if numTracks > 99 {
+		fmt.Println("Warning: More than 99 tracks found in CUE file. This may not be supported by all drives.")
+	}
+	var diskText = C.cd_get_cdtext(cueCD)
+	fmt.Println("Writing", convertPointerToString(C.cdtext_get(C.PTI_TITLE, diskText)), "by", convertPointerToString(C.cdtext_get(C.PTI_PERFORMER, diskText)), "to", flag.Arg(1))
 }
