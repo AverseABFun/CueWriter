@@ -53,8 +53,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"unsafe"
+
+	ffmpeg_go "github.com/u2takey/ffmpeg-go"
 )
+
+var command_test_unit_ready = []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+var command_read_capacity = []byte{0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 
 const VERSION = "0.1.0"
 
@@ -85,6 +92,12 @@ func sendSCSICommand(device string, cmd []byte) ([]byte, int) {
 	}
 
 	return response, 0
+}
+
+func convertToWav(input string, output string) error {
+	return ffmpeg_go.Input(input).
+		Output(output, ffmpeg_go.KwArgs{"ar": 44100, "sample_fmt": "s16", "ac": 2}).
+		OverWriteOutput().ErrorToStdOut().Run()
 }
 
 func convertPointerToString(ptr *C.char) string {
@@ -168,4 +181,40 @@ func main() {
 	}
 	var diskText = C.cd_get_cdtext(cueCD)
 	fmt.Println("Writing", convertPointerToString(C.cdtext_get(C.PTI_TITLE, diskText)), "by", convertPointerToString(C.cdtext_get(C.PTI_PERFORMER, diskText)), "to", flag.Arg(1))
+
+	var tempDir, error = os.MkdirTemp("", "cuewriter")
+	if error != nil {
+		fmt.Println("Error creating temporary directory:", error)
+		return
+	}
+	os.Chmod(tempDir, os.ModeTemporary|755)
+
+	for i := int32(1); i <= numTracks; i++ {
+		var track = C.cd_get_track(cueCD, C.int(i))
+		var trackFile = convertPointerToString(C.track_get_filename(track))
+		if !(strings.HasPrefix(trackFile, "/")) {
+			trackFile = filepath.Dir(flag.Arg(0)) + "/" + trackFile
+		}
+		trackFile = strings.ReplaceAll(trackFile, "\\", "/")
+		//var trackText = C.track_get_cdtext(track)
+		fmt.Printf("Writing track %02d\n", int(i))
+		convertToWav(trackFile, tempDir+"/track"+fmt.Sprintf("%02d", i)+".wav")
+		file, err := os.Open(tempDir + "/track" + fmt.Sprintf("%02d", i) + ".wav")
+		if err != nil {
+			fmt.Println("Error opening temporary file:", err)
+			return
+		}
+		info, err2 := file.Stat()
+		if err2 != nil {
+			fmt.Println("Error getting temporary file information:", err2)
+			return
+		}
+		data := make([]byte, info.Size())
+		if _, err := file.ReadAt(data, 44); err != nil {
+			fmt.Println("Error reading temporary file:", err)
+			return
+		}
+
+		defer file.Close()
+	}
 }
