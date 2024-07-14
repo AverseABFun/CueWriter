@@ -62,6 +62,7 @@ import (
 
 var command_test_unit_ready = []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 var command_read_capacity = []byte{0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+var command_get_type = []byte{0x12, 0x00, 0x00, 0x00, 0x05, 0x00}
 
 const VERSION = "0.1.0"
 
@@ -113,6 +114,7 @@ func main() {
 	fmt.Println("cuewriter v" + VERSION + ` - a tool to write CUE files to CDs
 	AGPL license, written by Averse
 	(c) 2024 Averse`)
+	fmt.Println()
 
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options] <cuefile> <device>\n", os.Args[0])
@@ -145,18 +147,24 @@ func main() {
 		flag.Usage()
 		return
 	}
-	if *dummy {
-		fmt.Println("Dummy mode is enabled. No data will be written to the disk.")
+
+	var inquiry_data5, inquiry_error5 = sendSCSICommand(flag.Arg(0), command_get_type)
+	if inquiry_error5 != 0 {
+		fmt.Println("Error getting device information: SCSI error", inquiry_error5)
+		os.Exit(inquiry_error5)
 	}
-	var inquiryData5, inquiryError5 = sendSCSICommand(flag.Arg(1), []byte{0x12, 0x00, 0x00, 0x00, 0x05, 0x00})
-	if inquiryError5 != 0 {
-		fmt.Println("Error getting device information: SCSI error", inquiryError5)
-		os.Exit(inquiryError5)
-	}
-	if inquiryData5[0]&(0x05) != 0x05 {
+	if inquiry_data5[0]&(0x05) != 0x05 {
 		fmt.Println("Device is not a CD/DVD drive.")
 		return
 	}
+
+	var ready_data, ready_error = sendSCSICommand(flag.Arg(0), command_test_unit_ready)
+	if ready_error != 0 {
+		fmt.Println("Error checking if device is ready: SCSI error", ready_error)
+		os.Exit(ready_error)
+	}
+	fmt.Println(ready_data)
+
 	var file, fileerror = os.OpenFile(flag.Arg(0), os.O_RDONLY, 0)
 	if fileerror != nil {
 		fmt.Println("Error opening file:", fileerror)
