@@ -12,10 +12,13 @@ package main
 
 #define SENSE_BUFF_LEN 32
 
-int send_scsi_command(const char *device, const unsigned char *cmd, int cmd_len, unsigned char *response, int response_len) {
+int send_scsi_command(const char *device, const unsigned char *cmd, int cmd_len, unsigned char *response, int response_len, unsigned char *sense_buffer, int sense_buffer_len) {
     int sg_fd;
-    unsigned char sense_buffer[SENSE_BUFF_LEN];
     sg_io_hdr_t io_hdr;
+
+	if (sense_buffer_len < SENSE_BUFF_LEN) {
+		return -3;
+	}
 
     sg_fd = open(device, O_RDWR);
     if (sg_fd < 0) {
@@ -25,7 +28,7 @@ int send_scsi_command(const char *device, const unsigned char *cmd, int cmd_len,
     memset(&io_hdr, 0, sizeof(sg_io_hdr_t));
     io_hdr.interface_id = 'S';
     io_hdr.cmd_len = cmd_len;
-    io_hdr.mx_sb_len = sizeof(sense_buffer);
+    io_hdr.mx_sb_len = sense_buffer_len;
     io_hdr.dxfer_direction = SG_DXFER_FROM_DEV;
     io_hdr.dxfer_len = response_len;
     io_hdr.dxferp = response;
@@ -40,7 +43,7 @@ int send_scsi_command(const char *device, const unsigned char *cmd, int cmd_len,
 
     if ((io_hdr.info & SG_INFO_OK_MASK) != SG_INFO_OK) {
         close(sg_fd);
-        return -3;
+        return io_hdr.info;
     }
 
     close(sg_fd);
@@ -63,6 +66,38 @@ import (
 var command_test_unit_ready = []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 var command_read_capacity = []byte{0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 var command_get_type = []byte{0x12, 0x00, 0x00, 0x00, 0x05, 0x00}
+var command_sense = []byte{0x03, 0x00, 0x00, 0x00, 96, 0x00}
+var command_mode_sense = []byte{0x1A, 0x00, 0x00, 0x00, 96, 0x00}
+var start_unit = []byte{0x1B, 0x00, 0x00, 0x00, 0x01, 0x00}
+var stop_unit = []byte{0x1B, 0x00, 0x00, 0x00, 0x00, 0x00}
+
+type sense_code struct {
+	code int
+	desc string
+}
+
+var sense_codes = []sense_code{
+	{0x00000, "No sense data present"},
+	{0x23A00, "Disc not present"},
+	{0x23A01, "Disc not present - tray is open"},
+	{0x23A02, "Disc not present"},
+	{0x20401, "Becoming ready"},
+	{0x20404, "Format in progress"},
+	{0x20409, "Self-test in progress"},
+	{0x20422, "Power cycle required"},
+	{0x23100, "Disc damaged or corrupt"},
+	{0x23101, "Format failed"},
+	{0x43E00, "Logical unit has not self-configured yet"},
+	{0x43E01, "Logical unit failure"},
+	{0x52500, "Logical unit doesn't support command"},
+	{0x20400, "Logical unit not ready - cause not reportable"},
+	{0x23000, "Incompatible medium installed"},
+}
+
+var sync_header = []byte{0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00}
+
+const FRAME_AUDIO_SIZE = 2352
+const FRAME_SUBCODE_SIZE = 96
 
 const VERSION = "0.1.0"
 
@@ -70,9 +105,11 @@ var dummy = flag.Bool("dummy", false, "set the laser to a level where it writes 
 var speed = flag.Float64("speed", 4.0, "set the writing speed. 4 is the default speed.")
 var get_error = flag.Int("get-error", 0, "get an error message for a specific error code")
 var help = flag.Bool("help", false, "show this help message")
+var ffmpeg_path = flag.String("ffmpeg-path", "", "path to the ffmpeg executable - if not set, system PATH will be searched")
 
-func sendSCSICommand(device string, cmd []byte) ([]byte, int) {
+func sendSCSICommand(device string, cmd []byte) ([]byte, []byte, int) {
 	var response = make([]byte, 96) // Adjust size as needed
+	var sense_buffer = make([]byte, C.SENSE_BUFF_LEN)
 
 	deviceC := C.CString(device)
 	defer C.free(unsafe.Pointer(deviceC))
@@ -86,19 +123,34 @@ func sendSCSICommand(device string, cmd []byte) ([]byte, int) {
 		C.int(len(cmd)),
 		(*C.uchar)(unsafe.Pointer(&response[0])),
 		C.int(len(response)),
+		(*C.uchar)(unsafe.Pointer(&sense_buffer[0])),
+		C.int(len(sense_buffer)),
 	)
 
 	if ret != 0 {
-		return nil, int(ret)
+		return sense_buffer, response, int(ret)
 	}
 
-	return response, 0
+	return sense_buffer, response, 0
 }
 
 func convertToWav(input string, output string) error {
-	return ffmpeg_go.Input(input).
+	var stream = ffmpeg_go.Input(input).
 		Output(output, ffmpeg_go.KwArgs{"ar": 44100, "sample_fmt": "s16", "ac": 2}).
-		OverWriteOutput().ErrorToStdOut().Run()
+		OverWriteOutput().Silent(true)
+	if ffmpeg_path != nil && *ffmpeg_path != "" {
+		stream.SetFfmpegPath(*ffmpeg_path)
+	}
+	return stream.Run()
+}
+
+func generateCombinedSenseCode(sense_data []byte) int32 {
+	var sense_key = sense_data[2] & 0x0F
+	var asc = sense_data[12]
+	var ascq = sense_data[13]
+	var combined = (int32(asc) << 8) | int32(ascq)
+	combined = (int32(sense_key) << 16) | combined
+	return combined
 }
 
 func convertPointerToString(ptr *C.char) string {
@@ -148,7 +200,7 @@ func main() {
 		return
 	}
 
-	var inquiry_data5, inquiry_error5 = sendSCSICommand(flag.Arg(0), command_get_type)
+	var _, inquiry_data5, inquiry_error5 = sendSCSICommand(flag.Arg(0), command_get_type)
 	if inquiry_error5 != 0 {
 		fmt.Println("Error getting device information: SCSI error", inquiry_error5)
 		os.Exit(inquiry_error5)
@@ -158,14 +210,34 @@ func main() {
 		return
 	}
 
-	var ready_data, ready_error = sendSCSICommand(flag.Arg(0), command_test_unit_ready)
-	if ready_error != 0 {
-		fmt.Println("Error checking if device is ready: SCSI error", ready_error)
-		os.Exit(ready_error)
+	var ready_sense, _, _ = sendSCSICommand(flag.Arg(0), command_test_unit_ready)
+	var combined = generateCombinedSenseCode(ready_sense)
+	for sense_codes_index := range sense_codes {
+		if combined == 0 {
+			break
+		}
+		if sense_codes[sense_codes_index].code == int(combined) {
+			fmt.Println("Logical unit is not ready:", sense_codes[sense_codes_index].desc)
+			switch sense_codes[sense_codes_index].code {
+			case 0x20401:
+				fmt.Println("Waiting for the drive to become ready...")
+				sendSCSICommand(flag.Arg(0), start_unit)
+				for {
+					ready_sense, _, _ = sendSCSICommand(flag.Arg(0), command_test_unit_ready)
+					combined = generateCombinedSenseCode(ready_sense)
+					if combined != 0x20401 {
+						break
+					}
+				}
+				fmt.Println("Drive is ready.")
+			case 0:
+				return
+			default:
+				return
+			}
+		}
 	}
-	fmt.Println(ready_data)
-
-	var file, fileerror = os.OpenFile(flag.Arg(0), os.O_RDONLY, 0)
+	var file, fileerror = os.OpenFile(flag.Arg(1), os.O_RDONLY, 0)
 	if fileerror != nil {
 		fmt.Println("Error opening file:", fileerror)
 		return
@@ -201,12 +273,16 @@ func main() {
 		var track = C.cd_get_track(cueCD, C.int(i))
 		var trackFile = convertPointerToString(C.track_get_filename(track))
 		if !(strings.HasPrefix(trackFile, "/")) {
-			trackFile = filepath.Dir(flag.Arg(0)) + "/" + trackFile
+			trackFile = filepath.Dir(flag.Arg(1)) + "/" + trackFile
 		}
 		trackFile = strings.ReplaceAll(trackFile, "\\", "/")
 		//var trackText = C.track_get_cdtext(track)
 		fmt.Printf("Writing track %02d\n", int(i))
-		convertToWav(trackFile, tempDir+"/track"+fmt.Sprintf("%02d", i)+".wav")
+		var err3 = convertToWav(trackFile, tempDir+"/track"+fmt.Sprintf("%02d", i)+".wav")
+		if err3 != nil {
+			fmt.Println("Error converting track to WAV:", err3)
+			return
+		}
 		file, err := os.Open(tempDir + "/track" + fmt.Sprintf("%02d", i) + ".wav")
 		if err != nil {
 			fmt.Println("Error opening temporary file:", err)
@@ -217,12 +293,31 @@ func main() {
 			fmt.Println("Error getting temporary file information:", err2)
 			return
 		}
-		data := make([]byte, info.Size())
-		if _, err := file.ReadAt(data, 44); err != nil {
+		wav_data := make([]byte, info.Size()-44)
+		if _, err := file.ReadAt(wav_data, 44); err != nil {
 			fmt.Println("Error reading temporary file:", err)
 			return
 		}
-
 		defer file.Close()
+		divided_data_l := make([][]byte, len(wav_data)/6)
+		divided_data_r := make([][]byte, len(wav_data)/6)
+		for j := 0; j < len(wav_data)/12; j += 1 {
+			for g := 0; g < 12; g += 1 {
+				if g%2 == 0 {
+					divided_data_l[j] = append(divided_data_l[j], wav_data[j*12+g])
+				} else {
+					divided_data_r[j] = append(divided_data_r[j], wav_data[j*12+g])
+				}
+			}
+		}
+
+		frames := make([][]byte, len(divided_data_l)/74)
+		for frame := range frames {
+			// REMEMBER THAT LAST BYTE SHOULD ONLY BE THE FIRST 4 BITS
+			frames[frame] = make([]byte, 74)
+			for i := 0; i < 74; i += 1 {
+				frames[frame][i] = 0
+			}
+		}
 	}
 }
